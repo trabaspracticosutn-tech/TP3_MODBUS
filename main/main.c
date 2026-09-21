@@ -4,10 +4,6 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 
-#include "rs485_uart.h"
-#include "modbus_master.h"
-#include "modbus_slave.h"
-
 #include "esp_adc/adc_oneshot.h"          // Libreria para el uso del ADC
 #include "esp_log.h"                      // Libreria para la calibración del ADC
 #include "esp_adc/adc_cali.h"             // Libreria para la calibración del ADC
@@ -45,14 +41,18 @@ void ADC1_inicializacion(                  ); // Función para inicializar el AD
 void ADC_calibracion    (                  ); // Función para calibrar el ADC con Line Fitting Scheme
 void ADC_leer_task      (void *pvParameters); // Tarea para leer el ADC en una tarea de FreeRTOS
 
-QueueHandle_t Com_to_adq      = xQueueCreate(10, sizeof(       1)); // Cola de Tarea de Comunicación a Tarea de Adquisición
-QueueHandle_t REG40001_to_Com = xQueueCreate(10, sizeof(uint16_t)); // Cola desde REG40001 a Tarea de Comunicación 
-QueueHandle_t REG40002_to_Com = xQueueCreate(10, sizeof(uint16_t)); // Cola desde REG40002 a Tarea de Comunicación
+QueueHandle_t Com_to_adq;
+QueueHandle_t REG40001_to_Com;
+QueueHandle_t REG40002_to_Com;
 
 // ------------------------------------------------------------------------------------
 
 void app_main(void)
 {
+    Com_to_adq      = xQueueCreate(10, sizeof(int));
+    REG40001_to_Com = xQueueCreate(10, sizeof(uint16_t));
+    REG40002_to_Com = xQueueCreate(10, sizeof(uint16_t));
+
     ADC_calibracion     ();   // Se calibra el ADC con Line Fitting Scheme
     ADC1_inicializacion ();   // Se inicializa el ADC1
 
