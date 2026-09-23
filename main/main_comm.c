@@ -1,124 +1,200 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_err.h"
 #include "esp_log.h"
-#include "driver/gpio.h"
-//#include "driver/adc.h"
 
 #include "comm.h"
 
+#ifndef APP_MODBUS_ROLE
+#define APP_MODBUS_ROLE MB_ROLE_MASTER
+#endif
+
+#ifndef APP_MODBUS_ADDRESS
+#define APP_MODBUS_ADDRESS 1
+#endif
+
+#define ADC_MUESTRAS 16
+#define LONGITUD_COLAS 10
+
+_Static_assert(APP_MODBUS_ROLE == MB_ROLE_MASTER ||
+               APP_MODBUS_ROLE == MB_ROLE_SLAVE, "Rol Modbus invalido");
+_Static_assert(APP_MODBUS_ADDRESS >= 1 && APP_MODBUS_ADDRESS <= 247,
+               "Direccion Modbus invalida");
+
 static const char *TAG = "app";
+static uint32_t muestras = ADC_MUESTRAS;
+static QueueHandle_t notificaciones;
 
-/* =========================================================================
- *  EJEMPLO A) Este ESP32 es el MAESTRO
- *  - Encola lecturas periódicas a los esclavos 1 y 2.
- *  - Una "Tarea de aplicación" consume la cola de notificaciones y hace
- *    algo con cada dato (ej: loguear, actualizar un dashboard, etc.)
- * ========================================================================= */
-static void tarea_aplicacion_maestro(void *arg)
+static QueueHandle_t crear_cola(UBaseType_t longitud, UBaseType_t tamano)
 {
-    QueueHandle_t notify_q = (QueueHandle_t)modbus_get_notify_queue();
-    mb_notify_t n;
+    QueueHandle_t cola = xQueueCreate(longitud, tamano);
+    ESP_ERROR_CHECK(cola != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+    return cola;
+}
 
-    while (1) {
-        if (xQueueReceive(notify_q, &n, portMAX_DELAY) == pdTRUE) {
-            if (n.result != MB_OK) {
-                ESP_LOGW(TAG, "Esclavo %d, reg %d: error %d", n.slave_addr, n.reg_addr, n.result);
-                continue;
+static void crear_tarea(TaskFunction_t funcion, const char *nombre,
+                        void *parametro, TaskHandle_t *handle)
+{
+    BaseType_t resultado = xTaskCreate(funcion, nombre, 4096, parametro, 5, handle);
+    ESP_ERROR_CHECK(resultado == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+}
+
+static void encolar_solicitud(const mb_request_t *solicitud)
+{
+    while (!modbus_master_enqueue_request(solicitud)) {
+        vTaskDelay(1);
+    }
+}
+
+/* Un solo consumidor distribuye las notificaciones a cada modulo. */
+static void tarea_notificaciones(void *arg)
+{
+    (void)arg;
+    mb_notify_t notificacion;
+
+    for (;;) {
+        if (xQueueReceive(notificaciones, &notificacion, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        if (notificacion.result != MB_OK) {
+            ESP_LOGW(TAG, "Esclavo %u, registro %u: error %d",
+                     (unsigned)notificacion.slave_addr,
+                     (unsigned)(40001 + notificacion.reg_addr),
+                     notificacion.result);
+            continue;
+        }
+
+        if (APP_MODBUS_ROLE == MB_ROLE_MASTER) {
+            ESP_LOGI(TAG, "Esclavo %u, registro %u = %u (%s)",
+                     (unsigned)notificacion.slave_addr,
+                     (unsigned)(40001 + notificacion.reg_addr),
+                     (unsigned)notificacion.value,
+                     notificacion.is_write ? "escritura" : "lectura");
+
+            if (!notificacion.is_write && notificacion.reg_addr == 3) {
+                mb_device_state_t estado = {
+                    .slave_addr = notificacion.slave_addr,
+                    .value = notificacion.value,
+                };
+                xQueueSend(estado_dipositivos, &estado, portMAX_DELAY);
             }
-            // reg_addr 0 = 4001 (valor_analogico_1), reg_addr 3 = 4004 (estado_dispositivo), etc.
-            ESP_LOGI(TAG, "Esclavo %d, reg 400%d = %d (%s)",
-                     n.slave_addr, n.reg_addr + 1, n.value, n.is_write ? "escritura" : "lectura");
+        } else if (notificacion.is_write && notificacion.reg_addr == 3) {
+            uint16_t estado_aplicado;
+            xQueueSend(Estado_registro, &notificacion.value, portMAX_DELAY);
+            xQueueReceive(Informacion_de_aplicacion, &estado_aplicado, portMAX_DELAY);
+
+            /* El banco ya contiene la escritura. Una confirmacion atrasada
+             * no debe sobrescribir una orden Modbus mas reciente. */
+            if (estado_aplicado != notificacion.value) {
+                ESP_LOGW(TAG, "Estado aplicado distinto del solicitado");
+            }
         }
     }
 }
 
 static void tarea_polling_maestro(void *arg)
 {
-    while (1) {
-        // Leer 4001-4004 (valor_analogico_1, valor_analogico_2, contador, estado_dispositivo)
-        // del esclavo 1
-        mb_request_t req1 = {
+    (void)arg;
+
+    for (;;) {
+        mb_request_t solicitud = {
             .slave_addr = 1,
             .function_code = MB_FC_READ_HOLDING_REGISTERS,
             .start_addr = 0,
             .quantity = 4,
         };
-        modbus_master_enqueue_request(&req1);
+        encolar_solicitud(&solicitud);
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        // Lo mismo para el esclavo 2
-        mb_request_t req2 = {
-            .slave_addr = 2,
-            .function_code = MB_FC_READ_HOLDING_REGISTERS,
-            .start_addr = 0,
-            .quantity = 4,
-        };
-        modbus_master_enqueue_request(&req2);
+        solicitud.slave_addr = 2;
+        encolar_solicitud(&solicitud);
         vTaskDelay(pdMS_TO_TICKS(1500));
     }
 }
 
-void app_main_maestro(void)
+static void tarea_escrituras_maestro(void *arg)
 {
-    modbus_comm_task_start(MB_ROLE_MASTER, /*own_addr=*/0); // own_addr no aplica al maestro
-    xTaskCreate(tarea_aplicacion_maestro, "tarea_app_maestro", 4096, NULL, 5, NULL);
-    xTaskCreate(tarea_polling_maestro, "tarea_polling", 4096, NULL, 5, NULL);
+    (void)arg;
+    mb_device_state_t estado;
+
+    for (;;) {
+        if (xQueueReceive(setear_dispositivos, &estado, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        mb_request_t solicitud = {
+            .slave_addr = estado.slave_addr,
+            .function_code = MB_FC_WRITE_SINGLE_REGISTER,
+            .start_addr = 3,
+            .quantity = 1,
+            .write_data = {estado.value},
+        };
+        encolar_solicitud(&solicitud);
+    }
 }
 
-/* =========================================================================
- *  EJEMPLO B) Este ESP32 es un ESCLAVO (por ejemplo, ESCLAVO 1)
- *  - "Tarea de aplicación": consume escrituras (ej: reg 4004 -> LED)
- *  - "Tarea de adquisición": lee el potenciómetro y actualiza 4001 en loop,
- *    así el comm task siempre responde con un valor fresco.
- * ========================================================================= */
-#define LED_GPIO          2
-#define POT_ADC_CHANNEL    ADC1_CHANNEL_6  // GPIO34, ejemplo
+static void leer_analogicas(uint16_t valores[2])
+{
+    QueueHandle_t respuestas[2] = {REG40001_to_Com, REG40002_to_Com};
 
-//static void tarea_aplicacion_esclavo(void *arg)
-//{
-//    QueueHandle_t notify_q = (QueueHandle_t)modbus_get_notify_queue();
-//    mb_notify_t n;
-//
-//    gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
-//
-//    while (1) {
-//        if (xQueueReceive(notify_q, &n, portMAX_DELAY) == pdTRUE) {
-//            if (!n.is_write) continue; // esta tarea solo actúa ante escrituras
+    for (int canal = 0; canal < 2; ++canal) {
+        xQueueSend(Com_to_adq, &canal, portMAX_DELAY);
+        xQueueReceive(respuestas[canal], &valores[canal], portMAX_DELAY);
+    }
+}
 
-//            if (n.reg_addr == 3) { // offset 3 = REG 40004 = estado_dispositivo
-//                gpio_set_level(LED_GPIO, n.value ? 1 : 0);
-//                ESP_LOGI(TAG, "LED actualizado por Modbus: %s", n.value ? "ON" : "OFF");
-//            }
-            // reg_addr == 4 (setpoint), 5 (tiempo), 6 (modo_operacion) ya quedaron
-            // guardados en el mapa por el comm task; acá se podría reaccionar también
-            // ante esos cambios si hiciera falta.
-//        }
-//    }
-//}
+/* comm.c responde desde su banco; el ADC debe refrescarlo antes de las lecturas. */
+static void tarea_datos_esclavo(void *arg)
+{
+    (void)arg;
+    uint16_t valores[2];
 
-//static void tarea_adquisicion_esclavo(void *arg)
-//{
-//    adc1_config_width(ADC_WIDTH_BIT_12);
-//    adc1_config_channel_atten(POT_ADC_CHANNEL, ADC_ATTEN_DB_12);
+    for (;;) {
+        leer_analogicas(valores);
+        modbus_slave_set_register(0, valores[0]);
+        modbus_slave_set_register(1, valores[1]);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
-//    while (1) {
-//        int lectura = adc1_get_raw(POT_ADC_CHANNEL);
-//        modbus_slave_set_register(0, (uint16_t)lectura); // offset 0 = REG 40001 = valor_analogico_1
-//        vTaskDelay(pdMS_TO_TICKS(100)); // refresco periódico, independiente de cuándo pregunte el maestro
-//    }
-//}
-
-//void app_main_esclavo(void)
-//{
-//    modbus_comm_task_start(MB_ROLE_SLAVE, /*own_addr=*/1); // dirección Modbus de ESTE esclavo
-//    xTaskCreate(tarea_aplicacion_esclavo, "tarea_app_esclavo", 4096, NULL, 5, NULL);
-//    xTaskCreate(tarea_adquisicion_esclavo, "tarea_adq_esclavo", 4096, NULL, 5, NULL);
-//}
-
-/* Descomentar solo uno de los dos según qué placa se está compilando: */
 void app_main(void)
 {
-    app_main_maestro();
-    // app_main_esclavo();
+    if (APP_MODBUS_ROLE == MB_ROLE_MASTER) {
+        estado_dipositivos = crear_cola(LONGITUD_COLAS, sizeof(mb_device_state_t));
+        setear_dispositivos = crear_cola(LONGITUD_COLAS, sizeof(mb_device_state_t));
+
+        modbus_comm_task_start(MB_ROLE_MASTER, 0);
+        notificaciones = modbus_get_notify_queue();
+        ESP_ERROR_CHECK(notificaciones != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+        crear_tarea(tarea_notificaciones, "notificaciones", NULL, NULL);
+        crear_tarea(app_master_task, "app_maestro", NULL, &Tarea_de_aplicacion_maestro);
+        crear_tarea(tarea_escrituras_maestro, "escrituras", NULL, NULL);
+        crear_tarea(tarea_polling_maestro, "polling", NULL, NULL);
+    } else {
+        Com_to_adq = crear_cola(LONGITUD_COLAS, sizeof(int));
+        REG40001_to_Com = crear_cola(LONGITUD_COLAS, sizeof(uint16_t));
+        REG40002_to_Com = crear_cola(LONGITUD_COLAS, sizeof(uint16_t));
+        Estado_registro = crear_cola(LONGITUD_COLAS, sizeof(uint16_t));
+        Informacion_de_aplicacion = crear_cola(LONGITUD_COLAS, sizeof(uint16_t));
+
+        app_gpio_inicializacion();
+        ADC1_inicializacion();
+        ADC_calibracion();
+        crear_tarea(ADC_leer_task, "ADC", &muestras, NULL);
+
+        uint16_t valores[2];
+        leer_analogicas(valores);
+
+        modbus_comm_task_start(MB_ROLE_SLAVE, APP_MODBUS_ADDRESS);
+        modbus_slave_set_register(0, valores[0]);
+        modbus_slave_set_register(1, valores[1]);
+        notificaciones = modbus_get_notify_queue();
+        ESP_ERROR_CHECK(notificaciones != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+        crear_tarea(app_slave_task, "app_esclavo", NULL, &Tarea_de_aplicacion_esclavo);
+        crear_tarea(tarea_notificaciones, "notificaciones", NULL, NULL);
+        crear_tarea(tarea_datos_esclavo, "datos_esclavo", NULL, NULL);
+    }
 }

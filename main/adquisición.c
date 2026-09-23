@@ -11,21 +11,10 @@
 
 #include <stdint.h>
 
-typedef struct {
-    uint16_t valor_analogico_1;     // REG 40001 
-    uint16_t valor_analogico_2;     // REG 40002     
-    uint16_t contador;              // REG 40003
-    uint16_t estado_dispositivo;    // REG 40004
-    uint16_t setpoint;              // REG 40005
-    uint16_t tiempo;                // REG 40006
-    uint16_t modo_operacion;        // REG 40007
-} modbus_holding_registers_t;
-
-modbus_holding_registers_t mapa_registros = {0};
+#include "comm.h"
 
 // --------------------------- TAREA DE ADQUISICIÓN -----------------------------------
 
-#define ADC_MUESTRAS 16                   // Cantidad de muestras a promediar
 #define N_CANALES 2
 
 adc_oneshot_unit_handle_t adc1_handle;    // Se crea una variable global
@@ -37,8 +26,8 @@ adc_channel_t canales[N_CANALES] = {
     ADC_CHANNEL_1, // GPIO37
 };
 
-void ADC1_inicializacion(                  ); // Función para inicializar el ADC1
-void ADC_calibracion    (                  ); // Función para calibrar el ADC con Line Fitting Scheme
+void ADC1_inicializacion(void); // Función para inicializar el ADC1
+void ADC_calibracion    (void); // Función para calibrar el ADC con Line Fitting Scheme
 void ADC_leer_task      (void *pvParameters); // Tarea para leer el ADC en una tarea de FreeRTOS
 
 QueueHandle_t Com_to_adq;
@@ -47,22 +36,7 @@ QueueHandle_t REG40002_to_Com;
 
 // ------------------------------------------------------------------------------------
 
-void app_main(void)
-{
-    Com_to_adq      = xQueueCreate(10, sizeof(int));
-    REG40001_to_Com = xQueueCreate(10, sizeof(uint16_t));
-    REG40002_to_Com = xQueueCreate(10, sizeof(uint16_t));
-
-    ADC_calibracion     ();   // Se calibra el ADC con Line Fitting Scheme
-    ADC1_inicializacion ();   // Se inicializa el ADC1
-
-    uint32_t muestras = ADC_MUESTRAS;     // Se define la cantidad de muestras a promediar
-
-    xTaskCreate(ADC_leer_task, "ADC", 4096, &muestras, 5, NULL);
-
-}
-
-void ADC_calibracion() // Función para calibrar el ADC con Line Fitting Scheme
+void ADC_calibracion(void) // Función para calibrar el ADC con Line Fitting Scheme
 {
     // Será para todos los canales del ADC1
     adc_cali_line_fitting_config_t cali_cfg = {
@@ -110,13 +84,20 @@ void ADC1_inicializacion(void) // Función para inicializar el ADC1
 void ADC_leer_task(void *pvParameters)
 {
     uint32_t n_muestras = *((uint32_t *)pvParameters);
+    ESP_ERROR_CHECK(n_muestras > 0 && n_muestras <= UINT32_MAX / 4095U
+                    ? ESP_OK : ESP_ERR_INVALID_ARG);
     while(1)
     {
+        int comando;
+        if (xQueueReceive(Com_to_adq, &comando, portMAX_DELAY) != pdTRUE ||
+            (comando != 0 && comando != 1)) {
+            continue;
+        }
         uint32_t suma[N_CANALES] = {0};
         uint32_t promedio[N_CANALES];
         int lectura;
 
-        for(int i = 0; i < n_muestras; i++)
+        for(uint32_t i = 0; i < n_muestras; i++)
         {
             for(int ch = 0; ch < N_CANALES; ch++)
             {
@@ -132,24 +113,9 @@ void ADC_leer_task(void *pvParameters)
             promedio[ch] = suma[ch] / n_muestras;
         }
 
-        int comando;
-        if(xQueueReceive(Com_to_adq, &comando, 0) == pdTRUE)
-        {
-            uint16_t valor_promedio;
-
-            if(comando == 0)
-            {
-                valor_promedio = promedio[0];
-                mapa_registros.valor_analogico_1 = valor_promedio;
-                xQueueSend(REG40001_to_Com, &valor_promedio, 0);
-            }
-            else if(comando == 1)
-            {
-                valor_promedio = promedio[1];
-                mapa_registros.valor_analogico_2 = valor_promedio;
-                xQueueSend(REG40002_to_Com, &valor_promedio, 0);
-            }
-        }
+        uint16_t valor_promedio = promedio[comando];
+        QueueHandle_t respuesta = comando == 0 ? REG40001_to_Com : REG40002_to_Com;
+        xQueueSend(respuesta, &valor_promedio, portMAX_DELAY);
     }
 }
 

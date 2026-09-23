@@ -394,14 +394,18 @@ void modbus_comm_task_start(mb_role_t role, uint8_t own_addr)
 #endif
 
     s_reg_mutex = xSemaphoreCreateMutex();
+    ESP_ERROR_CHECK(s_reg_mutex != NULL ? ESP_OK : ESP_ERR_NO_MEM);
     s_notify_queue = xQueueCreate(16, sizeof(mb_notify_t));
+    ESP_ERROR_CHECK(s_notify_queue != NULL ? ESP_OK : ESP_ERR_NO_MEM);
 
     if (role == MB_ROLE_MASTER) {
         s_request_queue = xQueueCreate(10, sizeof(mb_request_t));
+        ESP_ERROR_CHECK(s_request_queue != NULL ? ESP_OK : ESP_ERR_NO_MEM);
     }
 
     // Misma función de tarea para ambos roles; el rol ya quedó guardado en s_role.
-    xTaskCreate(modbus_comm_task, "modbus_comm_task", 4096, NULL, 10, NULL);
+    BaseType_t result = xTaskCreate(modbus_comm_task, "modbus_comm_task", 4096, NULL, 10, NULL);
+    ESP_ERROR_CHECK(result == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }
 
 int modbus_master_enqueue_request(const mb_request_t *req)
@@ -426,7 +430,7 @@ void modbus_slave_set_register(uint16_t reg_offset, uint16_t value)
     xSemaphoreGive(s_reg_mutex);
 }
 
-void *modbus_get_notify_queue(void)
+QueueHandle_t modbus_get_notify_queue(void)
 {
-    return (void *)s_notify_queue;
+    return s_notify_queue;
 } 

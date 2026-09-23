@@ -4,6 +4,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
 
 /* ============================================================
  *  Configuración UART / RS485 (común a maestro y esclavo)
@@ -53,8 +56,7 @@ typedef enum {
 
 /* ---------- Mapa de registros Holding (40001-40007) ----------
  * Usado por el rol ESCLAVO como su banco de registros local, y
- * por el rol MAESTRO como caché de lo último leído de cada esclavo
- * (en el maestro hay un mapa por dirección de esclavo, ver abajo). */
+ * por el rol MAESTRO como cache del ultimo esclavo consultado. */
 typedef struct {
     uint16_t valor_analogico_1;     // REG 40001
     uint16_t valor_analogico_2;     // REG 40002
@@ -66,7 +68,7 @@ typedef struct {
 } modbus_holding_registers_t;
 
 #define MB_REG_COUNT  (sizeof(modbus_holding_registers_t) / sizeof(uint16_t))
-#define MB_MAX_SLAVES 4   // cuántos esclavos puede trackear un maestro (direcciones 1..N)
+#define MB_MAX_SLAVES 4   // limite previsto para ampliar el seguimiento de esclavos
 
 /* ============================================================
  *  Rol MAESTRO: solicitudes salientes
@@ -106,7 +108,7 @@ void modbus_comm_task_start(mb_role_t role, uint8_t own_addr);
 
 // --- Uso en rol MAESTRO ---
 // Encola una solicitud saliente hacia un esclavo. El resultado llega de forma
-// asincrónica por mb_get_notify_queue().
+// asincrónica por modbus_get_notify_queue().
 int modbus_master_enqueue_request(const mb_request_t *req);
 
 // --- Uso en rol ESCLAVO ---
@@ -115,11 +117,34 @@ void modbus_slave_get_registers(modbus_holding_registers_t *out);
 void modbus_slave_set_register(uint16_t reg_offset, uint16_t value);
 
 // --- Común a ambos roles ---
-// Cola de notificaciones que consumen la Tarea de aplicación / Tarea de
-// adquisición (ver diagrama). Se crea en modbus_comm_task_start().
-void *modbus_get_notify_queue(void); // devuelve QueueHandle_t (void* para no obligar a incluir freertos acá)
+// Cola consumida por el distribuidor de main_comm.c para aplicacion y adquisicion.
+// Se crea en modbus_comm_task_start().
+QueueHandle_t modbus_get_notify_queue(void);
 
 // Calcula CRC16 Modbus sobre un buffer.
 uint16_t modbus_crc16(const uint8_t *buf, uint16_t len);
+
+/* Colas y tareas conectadas por main_comm.c. */
+typedef struct {
+    uint8_t slave_addr;
+    uint16_t value;
+} mb_device_state_t;
+
+extern QueueHandle_t Com_to_adq;
+extern QueueHandle_t REG40001_to_Com;
+extern QueueHandle_t REG40002_to_Com;
+extern QueueHandle_t Informacion_de_aplicacion;
+extern QueueHandle_t Estado_registro;
+extern QueueHandle_t estado_dipositivos;
+extern QueueHandle_t setear_dispositivos;
+extern TaskHandle_t Tarea_de_aplicacion_esclavo;
+extern TaskHandle_t Tarea_de_aplicacion_maestro;
+
+void ADC1_inicializacion(void);
+void ADC_calibracion(void);
+void ADC_leer_task(void *pvParameters);
+void app_gpio_inicializacion(void);
+void app_slave_task(void *pvParameters);
+void app_master_task(void *pvParameters);
 
 #endif // MODBUS_COMM_H
