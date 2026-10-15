@@ -1,16 +1,21 @@
 {
-  "idf.currentSetup": "C:\\esp\\v6.0\\esp-idf",
+  "idf.currentSetup": "/home/eros-nucifora/.espressif/v6.1/esp-idf",
+  "idf.buildPath": "${workspaceFolder}/build",
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
   ],
-  "idf.portWin": "detect",
   "idf.customExtraVars": {
-    "IDF_TARGET": "esp32"
+    "IDF_TARGET": "esp32",
+    "LD_LIBRARY_PATH": ""
   },
-  "clangd.path": "C:\\Espressif\\tools\\esp-clangd\\esp-21.1.3_20260408\\esp-clangd\\bin\\clangd.exe",
-  "clangd.arguments": [
-    "--background-index",
-    "--query-driver=**",
-    "--compile-commands-dir=c:\\Users\\Eros Nucifora\\Desktop\\Tp3_MODBUS\\build"
-  ]
+  "cmake.configureOnOpen": false,
+  "terminal.integrated.profiles.linux": {
+    "ESP-IDF (ESP32)": {
+      "path": "/bin/bash",
+      "args": ["--rcfile", "${workspaceFolder}/.vscode/esp-idf.bashrc"]
+    }
+  },
+  "terminal.integrated.defaultProfile.linux": "ESP-IDF (ESP32)",
+  "idf.flashType": "UART",
+  "idf.port": "/dev/ttyUSB0"
 }

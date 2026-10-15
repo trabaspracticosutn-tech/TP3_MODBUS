@@ -4,17 +4,22 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "driver/gpio.h"
+#include "driver/dac_oneshot.h"
 #include "esp_err.h"
 
 
 
-#define GPIO_LED GPIO_NUM_22
+#define GPIO_LED GPIO_NUM_26
 #define GPIO_MOTOR GPIO_NUM_23
+#define ADC_VALOR_MAXIMO 4095U
+#define DAC_VALOR_MAXIMO 255U
 
 void app_slave_task(void *pvParameters);
 void app_master_task(void *pvParameters);
 
 #include "comm.h"
+
+static const char *TAG = "control_led";
 
 TaskHandle_t Tarea_de_aplicacion_esclavo;
 TaskHandle_t Tarea_de_aplicacion_maestro;
@@ -49,6 +54,74 @@ void app_master_task(void *pvParameters)
     }
 }
 
+void app_dac_master_task(void *pvParameters)
+{
+    QueueHandle_t valores_analogicos = (QueueHandle_t)pvParameters;
+    ESP_ERROR_CHECK(valores_analogicos != NULL ? ESP_OK : ESP_ERR_INVALID_ARG);
+
+    for (;;) {
+        mb_notify_t dato;
+        if (xQueueReceive(valores_analogicos, &dato, portMAX_DELAY) != pdTRUE ||
+            dato.result != MB_OK || dato.is_write || dato.reg_addr != MB_REG_ADC_0_OFFSET) {
+            continue;
+        }
+
+        uint32_t valor_adc = dato.value;
+        if (valor_adc > ADC_VALOR_MAXIMO) {
+            valor_adc = ADC_VALOR_MAXIMO;
+        }
+        uint16_t nivel_dac = (valor_adc * DAC_VALOR_MAXIMO) / ADC_VALOR_MAXIMO;
+        unsigned porcentaje_nivel = (nivel_dac * 100U) / DAC_VALOR_MAXIMO;
+        // El maestro calcula el nivel y lo escribe en el esclavo que envio el ADC.
+        mb_request_t solicitud = {
+            .slave_addr = dato.slave_addr,
+            .function_code = MB_FC_WRITE_SINGLE_REGISTER,
+            .start_addr = MB_REG_DAC_2_OFFSET,
+            .quantity = 1,
+            .write_data = {nivel_dac},
+        };
+        ESP_LOGI(TAG, "[MAESTRO] Esclavo %u, LED en DAC2 (GPIO26, pin fisico 10): "
+                 "ADC0 usado=%u/%u -> nivel DAC=%u/%u (%u%%); "
+                 "solicitud de escritura FC=0x%02X, registro %u "
+                 "(offset %u), valor=0x%04X",
+                 (unsigned)dato.slave_addr,
+                 (unsigned)valor_adc, (unsigned)ADC_VALOR_MAXIMO,
+                 (unsigned)nivel_dac, (unsigned)DAC_VALOR_MAXIMO,
+                 porcentaje_nivel, (unsigned)solicitud.function_code,
+                 (unsigned)(40001 + solicitud.start_addr),
+                 (unsigned)solicitud.start_addr, (unsigned)nivel_dac);
+        while (!modbus_master_enqueue_request(&solicitud)) {
+            vTaskDelay(1);
+        }
+    }
+}
+
+void app_dac_slave_task(void *pvParameters)
+{
+    QueueHandle_t niveles_dac = (QueueHandle_t)pvParameters;
+    ESP_ERROR_CHECK(niveles_dac != NULL ? ESP_OK : ESP_ERR_INVALID_ARG);
+    dac_oneshot_handle_t salida;
+    dac_oneshot_config_t configuracion = {
+        // DAC2: GPIO26, pin fisico 10 del conector J2 de la DevKitC.
+        .chan_id = DAC_CHAN_1,
+    };
+    ESP_ERROR_CHECK(dac_oneshot_new_channel(&configuracion, &salida));
+    ESP_ERROR_CHECK(dac_oneshot_output_voltage(salida, 0));
+
+    for (;;) {
+        mb_dac_value_t dato;
+        if (xQueueReceive(niveles_dac, &dato, portMAX_DELAY) != pdTRUE ||
+            dato.canal != DAC_CHAN_1) {
+            continue;
+        }
+
+        // La orden ya contiene el nivel de 8 bits calculado por el maestro.
+        uint8_t valor_dac = dato.valor_dac > DAC_VALOR_MAXIMO
+                           ? DAC_VALOR_MAXIMO : dato.valor_dac;
+        ESP_ERROR_CHECK(dac_oneshot_output_voltage(salida, valor_dac));
+    }
+}
+
 void app_slave_task(void *pvParameters)
 {
     while (1)
@@ -65,5 +138,3 @@ void app_slave_task(void *pvParameters)
 
     }
 }
-
-

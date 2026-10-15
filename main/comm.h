@@ -12,8 +12,10 @@
  *  Configuración UART / RS485 (común a maestro y esclavo)
  * ============================================================ */
 #define MB_UART_PORT          UART_NUM_1
+
 #define MB_UART_TX_PIN        17
 #define MB_UART_RX_PIN        16
+
 #define MB_UART_RTS_PIN       18   // control DE/RE del MAX485
 #define MB_UART_BAUDRATE      9600
 #define MB_UART_BUF_SIZE      256
@@ -23,6 +25,9 @@
 #define MB_RS485_MANUAL_DE_RE 1
 
 #define MB_MAX_FRAME_LEN         256
+#define MB_UART_BITS_PER_CHAR     10 // UART configurada en 8N1.
+#define MB_FRAME_GAP_MS ((35U * 1000U * MB_UART_BITS_PER_CHAR + \
+                         10U * MB_UART_BAUDRATE - 1U) / (10U * MB_UART_BAUDRATE))
 #define MB_RESPONSE_TIMEOUT_MS   200   // usado solo en rol MAESTRO
 #define MB_MAX_RETRIES              3  // usado solo en rol MAESTRO
 #define MB_SLAVE_LISTEN_TIMEOUT_MS  50 // usado solo en rol ESCLAVO (poleo de UART)
@@ -54,19 +59,24 @@ typedef enum {
     MB_ERR_TX,
 } mb_result_t;
 
-/* ---------- Mapa de registros Holding (40001-40007) ----------
+/* ---------- Mapa de registros Holding (40001-40009) ----------
  * Usado por el rol ESCLAVO como su banco de registros local, y
  * por el rol MAESTRO como cache del ultimo esclavo consultado. */
 typedef struct {
-    uint16_t valor_analogico_1;     // REG 40001
-    uint16_t valor_analogico_2;     // REG 40002
+    uint16_t valor_analogico_1;     // REG 40001: ADC0 GPIO36 (pin fisico J2.3)
+    uint16_t valor_analogico_2;     // REG 40002: reservado
     uint16_t contador;              // REG 40003
     uint16_t estado_dispositivo;    // REG 40004
     uint16_t setpoint;              // REG 40005
     uint16_t tiempo;                // REG 40006
     uint16_t modo_operacion;        // REG 40007
+    uint16_t nivel_dac_1;           // REG 40008: reservado
+    uint16_t nivel_dac_2;           // REG 40009: DAC2 GPIO26 (pin fisico J2.10), 0..255
 } modbus_holding_registers_t;
 
+#define MB_REG_ADC_0_OFFSET 0U
+#define MB_REG_DAC_1_OFFSET 7U
+#define MB_REG_DAC_2_OFFSET 8U
 #define MB_REG_COUNT  (sizeof(modbus_holding_registers_t) / sizeof(uint16_t))
 #define MB_MAX_SLAVES 4   // limite previsto para ampliar el seguimiento de esclavos
 
@@ -76,7 +86,7 @@ typedef struct {
 typedef struct {
     uint8_t  slave_addr;
     uint8_t  function_code;
-    uint16_t start_addr;       // offset dentro del mapa (0=4001 ... 6=4007)
+    uint16_t start_addr;       // offset dentro del mapa (0=40001 ... 8=40009)
     uint16_t quantity;
     uint16_t write_data[8];
 } mb_request_t;
@@ -91,7 +101,7 @@ typedef struct {
  * ============================================================ */
 typedef struct {
     uint8_t     slave_addr;    // relevante en rol MAESTRO (de qué esclavo vino/fue)
-    uint16_t    reg_addr;      // offset de registro (0..6)
+    uint16_t    reg_addr;      // offset de registro (0..8)
     uint16_t    value;         // valor leído o escrito
     bool        is_write;      // true = escritura, false = lectura
     mb_result_t result;        // MB_OK si todo salió bien
@@ -130,9 +140,14 @@ typedef struct {
     uint16_t value;
 } mb_device_state_t;
 
+/* Orden recibida por el esclavo: canal DAC (1 = DAC2) y nivel de 8 bits. */
+typedef struct {
+    uint8_t canal;
+    uint16_t valor_dac;
+} mb_dac_value_t;
+
 extern QueueHandle_t Com_to_adq;
 extern QueueHandle_t REG40001_to_Com;
-extern QueueHandle_t REG40002_to_Com;
 extern QueueHandle_t Informacion_de_aplicacion;
 extern QueueHandle_t Estado_registro;
 extern QueueHandle_t estado_dipositivos;
@@ -146,5 +161,9 @@ void ADC_leer_task(void *pvParameters);
 void app_gpio_inicializacion(void);
 void app_slave_task(void *pvParameters);
 void app_master_task(void *pvParameters);
+/* Recibe una cola de mb_notify_t con lecturas ADC; envia ordenes Modbus. */
+void app_dac_master_task(void *pvParameters);
+/* Recibe una cola de mb_dac_value_t; aplica las ordenes al DAC del esclavo. */
+void app_dac_slave_task(void *pvParameters);
 
 #endif // MODBUS_COMM_H
