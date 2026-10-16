@@ -17,5 +17,5 @@
   },
   "terminal.integrated.defaultProfile.linux": "ESP-IDF (ESP32)",
   "idf.flashType": "UART",
-  "idf.port": "/dev/ttyUSB0"
+  "idf.port": "/dev/ttyUSB1"
 }

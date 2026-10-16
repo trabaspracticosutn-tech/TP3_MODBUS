@@ -534,7 +534,7 @@ void modbus_comm_task_start(mb_role_t role, uint8_t own_addr)
     uart_config_t uart_config = {
         .baud_rate = MB_UART_BAUDRATE,
         .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
+        .parity    = UART_PARITY_EVEN,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,

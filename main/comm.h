@@ -25,7 +25,7 @@
 #define MB_RS485_MANUAL_DE_RE 1
 
 #define MB_MAX_FRAME_LEN         256
-#define MB_UART_BITS_PER_CHAR     10 // UART configurada en 8N1.
+#define MB_UART_BITS_PER_CHAR     11 // UART configurada en 8N1.
 #define MB_FRAME_GAP_MS ((35U * 1000U * MB_UART_BITS_PER_CHAR + \
                          10U * MB_UART_BAUDRATE - 1U) / (10U * MB_UART_BAUDRATE))
 #define MB_RESPONSE_TIMEOUT_MS   200   // usado solo en rol MAESTRO

@@ -6,7 +6,7 @@
 
 #include "comm.h"
 
-#define APP_MODBUS_ROLE MB_ROLE_MASTER
+#define APP_MODBUS_ROLE MB_ROLE_SLAVE
 
 #define APP_MODBUS_ADDRESS 1
 
